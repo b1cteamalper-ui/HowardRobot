@@ -49,6 +49,31 @@ width:260px;
 background:#1f2937;
 border-right:1px solid #374151;
 overflow-y:auto;
+display:flex;
+flex-direction:column;
+}
+
+.sidebarHeader{
+padding:12px;
+border-bottom:1px solid #374151;
+display:flex;
+gap:8px;
+align-items:center;
+}
+
+.searchInput{
+flex:1;
+padding:8px;
+border-radius:6px;
+border:none;
+outline:none;
+background:#374151;
+color:white;
+}
+
+.userList{
+overflow-y:auto;
+flex:1;
 }
 
 .userItem{
@@ -138,7 +163,13 @@ gap:15px;
 </div>
 
 <div id="chatScreen" class="container hidden">
-<div id="sidebar" class="sidebar hidden"></div>
+<div id="sidebar" class="sidebar hidden">
+  <div class="sidebarHeader">
+    <input id="searchInput" class="searchInput" placeholder="Kullanıcı ara..." />
+    <button id="refreshBtn">Yenile</button>
+  </div>
+  <div id="userList" class="userList"></div>
+</div>
 
 <div class="chatArea">
 <div id="messages" class="messages"></div>
@@ -156,11 +187,20 @@ import {
   signInWithEmailAndPassword, 
   createUserWithEmailAndPassword, 
   signOut, 
-  onAuthStateChanged,
-  setPersistence,
-  browserSessionPersistence
+  onAuthStateChanged, 
+  setPersistence, 
+  browserSessionPersistence 
 } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
-import { getFirestore, collection, addDoc, query, orderBy, onSnapshot } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+import { 
+  getFirestore, 
+  collection, 
+  addDoc, 
+  query, 
+  orderBy, 
+  onSnapshot,
+  doc,
+  setDoc
+} from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
 
 const firebaseConfig = {
 apiKey: "AIzaSyApJA39yInAqrWjYIa7kh7lLohV71OrsHg",
@@ -179,12 +219,17 @@ let myUsername=null;
 let isAdmin=false;
 let selectedRoom=null;
 let unsubscribe=null;
+let roomsList = []; // admin için tüm odalar
+let roomsUnsub = null;
 
 const authScreen=document.getElementById("authScreen");
 const chatScreen=document.getElementById("chatScreen");
 const sidebar=document.getElementById("sidebar");
 const logoutBtn=document.getElementById("logoutBtn");
 const messagesDiv=document.getElementById("messages");
+const userListDiv=document.getElementById("userList");
+const searchInput=document.getElementById("searchInput");
+const refreshBtn=document.getElementById("refreshBtn");
 
 document.getElementById("loginBtn").onclick=async()=>{
   const username=document.getElementById("username").value.trim();
@@ -194,20 +239,12 @@ document.getElementById("loginBtn").onclick=async()=>{
   const email=username.toLowerCase()+"@howard.com";
 
   try{
-    // ÖNEMLİ: burada persistence'i "session" yapıyoruz.
-    // Böylece oturum sadece bu sekmeye özel olur; diğer sekmeler etkilenmez.
     await setPersistence(auth, browserSessionPersistence);
-
-    // önce giriş yapmayı dene
     await signInWithEmailAndPassword(auth,email,password);
-  }catch(signInError){
-    // giriş başarısızsa yeni kullanıcı oluşturmayı dene (aynı persistence kullanılıyor)
+  }catch{
     try{
       await createUserWithEmailAndPassword(auth,email,password);
-    }catch(e){
-      console.error("Auth hata:", e);
-      alert("Giriş başarısız");
-    }
+    }catch(e){alert("Giriş başarısız");}
   }
 };
 
@@ -218,11 +255,12 @@ onAuthStateChanged(auth,(user)=>{
     logoutBtn.classList.remove("hidden");
 
     myUsername=user.email.replace("@howard.com","");
-    // admin kontrolünü olduğu gibi bıraktım
     isAdmin = user.email==="howard@howard.com";
 
     if(isAdmin){
       sidebar.classList.remove("hidden");
+      // admin görünümü: arama aktif et
+      searchInput.value = "";
       loadUserRooms();
     }else{
       sidebar.classList.add("hidden");
@@ -234,61 +272,97 @@ onAuthStateChanged(auth,(user)=>{
     authScreen.classList.remove("hidden");
     chatScreen.classList.add("hidden");
     logoutBtn.classList.add("hidden");
-    // temizle
     myUsername=null;
     selectedRoom=null;
     if(unsubscribe){ unsubscribe(); unsubscribe=null; }
+    if(roomsUnsub){ roomsUnsub(); roomsUnsub=null; roomsList=[]; userListDiv.innerHTML=""; }
     messagesDiv.innerHTML="";
   }
 });
 
 logoutBtn.onclick=()=>signOut(auth);
 
+// Admin: odaları al ve göster (arama ile filtrelenebilir)
 function loadUserRooms(){
-  const chatsRef=collection(db,"chats");
+  const chatsRef = collection(db,"chats");
 
-  onSnapshot(chatsRef,(snap)=>{
-    sidebar.innerHTML="";
+  if(roomsUnsub) roomsUnsub();
+
+  roomsUnsub = onSnapshot(chatsRef,(snap)=>{
+    roomsList = [];
     snap.forEach(docSnap=>{
-      const room=docSnap.id;
-      const div=document.createElement("div");
-      div.className="userItem";
-      div.innerText=room;
-      div.onclick=()=>{
-        selectedRoom=room;
-        loadChat(room);
-      };
-      sidebar.appendChild(div);
+      roomsList.push(docSnap.id);
     });
+    renderRoomList();
   });
 }
 
+// admin için refresh butonu
+refreshBtn.onclick = () => {
+  if(isAdmin) loadUserRooms();
+};
+
+function renderRoomList(){
+  const q = searchInput.value.trim().toLowerCase();
+  userListDiv.innerHTML = "";
+  const filtered = roomsList.filter(r => r.toLowerCase().includes(q));
+  // sıralama: en yeni önce olabilir; burada alfabe
+  filtered.sort();
+
+  if(filtered.length===0){
+    const no = document.createElement("div");
+    no.className="userItem";
+    no.innerText="Kullanıcı bulunamadı";
+    userListDiv.appendChild(no);
+    return;
+  }
+
+  filtered.forEach(room=>{
+    const div=document.createElement("div");
+    div.className="userItem";
+    div.innerText=room;
+    div.onclick=()=>{
+      selectedRoom=room;
+      loadChat(room);
+    };
+    userListDiv.appendChild(div);
+  });
+}
+
+searchInput.addEventListener("input", renderRoomList);
+
+// Tüm kullanıcıların mesajlarını yükle (admin veya normal kullanıcı için)
 function loadChat(room){
   if(unsubscribe) unsubscribe();
   messagesDiv.innerHTML="";
 
-  const q=query(collection(db,"chats",room,"messages"),orderBy("time"));
+  const q = query(collection(db,"chats",room,"messages"), orderBy("time"));
 
-  unsubscribe=onSnapshot(q,(snap)=>{
+  unsubscribe = onSnapshot(q,(snap)=>{
     messagesDiv.innerHTML="";
     snap.forEach(docSnap=>{
-      const data=docSnap.data();
+      const data = docSnap.data();
+
+      // --- Güçlendirilmiş sender + time dönüşümü ---
+      const sender = data.from ?? data.fromName ?? data.sender ?? data.name ?? "Howard";
+      const rawTime = data.time;
+      const timestamp = (rawTime && typeof rawTime.toMillis === "function") ? rawTime.toMillis() : rawTime;
+      const timeStr = timestamp ? new Date(timestamp).toLocaleTimeString() : "";
+
       const div=document.createElement("div");
+      div.className = (myUsername && sender === myUsername) ? "msg me" : "msg other";
 
-      div.className = data.from===myUsername ? "msg me" : "msg other";
-
-      div.innerHTML=`
-        <b>${data.from}</b><br>
-        ${data.text}
-        <div class="time">${new Date(data.time).toLocaleTimeString()}</div>
-      `;
-
+      // Basit sanitize: text yerine güvenli text node ekleyelim (XSS riskini azaltır)
+      const nameHtml = `<b>${escapeHtml(sender)}</b><br>`;
+      const textHtml = escapeHtml(String(data.text ?? ""));
+      div.innerHTML = nameHtml + textHtml + `<div class="time">${timeStr}</div>`;
       messagesDiv.appendChild(div);
     });
     messagesDiv.scrollTop=messagesDiv.scrollHeight;
   });
 }
 
+// Gönderme: önce parent dokümanı yarat ( böylece admin listesinde görünür )
 document.getElementById("sendBtn").onclick=sendMessage;
 document.getElementById("messageInput").addEventListener("keypress",(e)=>{
   if(e.key==="Enter") sendMessage();
@@ -299,16 +373,35 @@ async function sendMessage(){
   if(!text) return;
 
   const room=isAdmin?selectedRoom:myUsername;
-  if(!room) return;
+  if(!room) return alert("Oda seçili değil.");
 
-  await addDoc(collection(db,"chats",room,"messages"),{
-    from: myUsername,
-    text:text,
-    time:Date.now()
-  });
+  try{
+    // parent doc'u garantiyle oluştur (merge ile mevcutsa bozmaz)
+    await setDoc(doc(db,"chats",room), { createdAt: Date.now(), room: room }, { merge: true });
 
-  document.getElementById("messageInput").value="";
+    await addDoc(collection(db,"chats",room,"messages"),{
+      from: myUsername,
+      text:text,
+      time:Date.now()
+    });
+
+    document.getElementById("messageInput").value="";
+  }catch(e){
+    console.error("Mesaj gönderme hatası:", e);
+    alert("Mesaj gönderilemedi.");
+  }
 }
+
+// küçük yardımcı: XSS için basit kaçış
+function escapeHtml(unsafe) {
+  return unsafe
+       .replaceAll("&", "&amp;")
+       .replaceAll("<", "&lt;")
+       .replaceAll(">", "&gt;")
+       .replaceAll('"', "&quot;")
+       .replaceAll("'", "&#039;");
+}
+
 </script>
 </body>
 </html>
